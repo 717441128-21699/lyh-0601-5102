@@ -38,10 +38,14 @@ class ChangeRequest(Base):
     new_data = Column(Text)
     diff_data = Column(Text)
     status = Column(String(20), default="PENDING")
+    priority = Column(String(20), default="NORMAL")
+    approval_chain_id = Column(Integer, ForeignKey("approval_chains.id"))
+    current_node_index = Column(Integer, default=0)
     approval_level = Column(String(50))
     approver = Column(String(100))
     approval_comment = Column(String(500))
     approved_at = Column(DateTime)
+    is_overdue = Column(Boolean, default=False)
     risk_triggered = Column(Boolean, default=False)
     risk_reason = Column(String(500))
     sync_status = Column(String(20), default="PENDING")
@@ -50,6 +54,8 @@ class ChangeRequest(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     customer = relationship("Customer", backref="change_requests")
+    approval_chain = relationship("ApprovalChain", backref="change_requests")
+    approval_records = relationship("ApprovalRecord", back_populates="change_request", order_by="ApprovalRecord.node_order")
     sync_records = relationship("SyncRecord", back_populates="change_request")
     notifications = relationship("Notification", back_populates="change_request")
 
@@ -129,6 +135,76 @@ class DailyReport(Base):
     department_stats = Column(Text)
     change_type_stats = Column(Text)
     risk_warning_count = Column(Integer, default=0)
+    overdue_count = Column(Integer, default=0)
     pdf_path = Column(String(500))
     excel_path = Column(String(500))
     created_at = Column(DateTime, default=datetime.now)
+
+
+class ApprovalChain(Base):
+    __tablename__ = "approval_chains"
+
+    id = Column(Integer, primary_key=True, index=True)
+    chain_name = Column(String(100), nullable=False)
+    description = Column(String(500))
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    nodes = relationship("ApprovalNode", back_populates="chain", order_by="ApprovalNode.node_order")
+    rules = relationship("ApprovalRule", back_populates="chain")
+
+
+class ApprovalNode(Base):
+    __tablename__ = "approval_nodes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    chain_id = Column(Integer, ForeignKey("approval_chains.id"), nullable=False)
+    node_name = Column(String(100), nullable=False)
+    node_order = Column(Integer, default=0)
+    approver_role = Column(String(50))
+    approver = Column(String(100))
+    department = Column(String(100))
+    timeout_hours = Column(Integer, default=24)
+    created_at = Column(DateTime, default=datetime.now)
+
+    chain = relationship("ApprovalChain", back_populates="nodes")
+
+
+class ApprovalRule(Base):
+    __tablename__ = "approval_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rule_name = Column(String(100), nullable=False)
+    chain_id = Column(Integer, ForeignKey("approval_chains.id"), nullable=False)
+    priority = Column(Integer, default=0)
+    customer_level = Column(String(20))
+    change_type = Column(String(50))
+    department = Column(String(100))
+    industry = Column(String(100))
+    min_change_fields = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    description = Column(String(500))
+    created_at = Column(DateTime, default=datetime.now)
+
+    chain = relationship("ApprovalChain", back_populates="rules")
+
+
+class ApprovalRecord(Base):
+    __tablename__ = "approval_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    change_request_id = Column(Integer, ForeignKey("change_requests.id"), nullable=False)
+    node_id = Column(Integer, ForeignKey("approval_nodes.id"))
+    node_name = Column(String(100))
+    node_order = Column(Integer, default=0)
+    approver_role = Column(String(50))
+    approver = Column(String(100))
+    action = Column(String(20))
+    comment = Column(String(500))
+    approved_at = Column(DateTime)
+    is_overdue = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.now)
+
+    change_request = relationship("ChangeRequest", back_populates="approval_records")
+    node = relationship("ApprovalNode")

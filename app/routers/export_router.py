@@ -16,6 +16,7 @@ def export_change_requests(
     customer_name: Optional[str] = Query(None, description="客户名称"),
     start_date: Optional[date] = Query(None, description="开始日期"),
     end_date: Optional[date] = Query(None, description="结束日期"),
+    quick_range: Optional[str] = Query(None, description="快捷范围: today/yesterday/7d/30d"),
     status: Optional[str] = Query(None, description="状态"),
     department: Optional[str] = Query(None, description="部门"),
     db: Session = Depends(get_db)
@@ -29,7 +30,7 @@ def export_change_requests(
         page=1,
         page_size=10000
     )
-    filepath = export_service.export_change_requests_excel(db, query)
+    filepath = export_service.export_change_requests_excel(db, query, quick_range=quick_range)
     filename = filepath.split("\\")[-1]
     return FileResponse(
         filepath,
@@ -58,12 +59,14 @@ def batch_export_details(
 def export_operation_logs(
     start_date: Optional[date] = Query(None, description="开始日期"),
     end_date: Optional[date] = Query(None, description="结束日期"),
+    quick_range: Optional[str] = Query(None, description="快捷范围: today/yesterday/7d/30d"),
     operator: Optional[str] = Query(None, description="操作人"),
     operation_type: Optional[str] = Query(None, description="操作类型"),
     db: Session = Depends(get_db)
 ):
     filepath = export_service.export_operation_logs_excel(
         db, start_date=start_date, end_date=end_date,
+        quick_range=quick_range,
         operator=operator, operation_type=operation_type
     )
     filename = filepath.split("\\")[-1]
@@ -78,6 +81,7 @@ def export_operation_logs(
 def list_operation_logs(
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None),
+    quick_range: Optional[str] = Query(None, description="快捷范围: today/yesterday/7d/30d"),
     operator: Optional[str] = Query(None),
     operation_type: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
@@ -86,10 +90,32 @@ def list_operation_logs(
 ):
     query = db.query(OperationLog)
 
-    if start_date:
-        query = query.filter(OperationLog.created_at >= start_date)
-    if end_date:
-        query = query.filter(OperationLog.created_at <= end_date)
+    from datetime import datetime, timedelta
+    if quick_range:
+        today = date.today()
+        if quick_range == "today":
+            start_dt = datetime.combine(today, datetime.min.time())
+            end_dt = datetime.combine(today, datetime.max.time())
+        elif quick_range == "yesterday":
+            yesterday = today - timedelta(days=1)
+            start_dt = datetime.combine(yesterday, datetime.min.time())
+            end_dt = datetime.combine(yesterday, datetime.max.time())
+        elif quick_range == "7d":
+            start_dt = datetime.combine(today - timedelta(days=6), datetime.min.time())
+            end_dt = datetime.combine(today, datetime.max.time())
+        elif quick_range == "30d":
+            start_dt = datetime.combine(today - timedelta(days=29), datetime.min.time())
+            end_dt = datetime.combine(today, datetime.max.time())
+        else:
+            start_dt, end_dt = None, None
+    else:
+        start_dt = datetime.combine(start_date, datetime.min.time()) if start_date else None
+        end_dt = datetime.combine(end_date, datetime.max.time()) if end_date else None
+
+    if start_dt:
+        query = query.filter(OperationLog.created_at >= start_dt)
+    if end_dt:
+        query = query.filter(OperationLog.created_at <= end_dt)
     if operator:
         query = query.filter(OperationLog.operator == operator)
     if operation_type:

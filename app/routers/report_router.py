@@ -63,3 +63,17 @@ def download_excel(report_date: date, db: Session = Depends(get_db)):
 def get_7day_trend(end_date: date = Query(None, description="结束日期"), db: Session = Depends(get_db)):
     trend = report_service.get_7day_trend(db, end_date)
     return {"trend": trend}
+
+
+@router.get("/trend/30day", summary="获取30日趋势数据")
+def get_30day_trend(end_date: date = Query(None, description="结束日期"), db: Session = Depends(get_db)):
+    trend = report_service.get_30day_trend(db, end_date)
+    return {"trend": trend}
+
+
+@router.get("/daily/{report_date}/detail", summary="获取日报详情（含结构化统计）")
+def get_report_detail(report_date: date, db: Session = Depends(get_db)):
+    detail = report_service.get_report_detail(db, report_date)
+    if not detail:
+        raise HTTPException(status_code=404, detail="日报不存在")
+    return detail

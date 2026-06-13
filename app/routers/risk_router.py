@@ -37,3 +37,12 @@ def handle_warning(
         return warning
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/customers/{customer_id}/status", summary="获取客户风控状态")
+def get_customer_risk_status(customer_id: int, db: Session = Depends(get_db)):
+    try:
+        status = risk_service.get_customer_risk_status(db, customer_id)
+        return status
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))

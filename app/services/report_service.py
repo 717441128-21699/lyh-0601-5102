@@ -43,24 +43,9 @@ def generate_daily_report(db: Session, report_date: date = None) -> DailyReport:
             processing_hours.append(delta.total_seconds() / 3600)
     avg_processing_hours = sum(processing_hours) / len(processing_hours) if processing_hours else 0.0
 
-    department_stats = {}
-    for r in day_requests:
-        dept = r.department or "未分配"
-        if dept not in department_stats:
-            department_stats[dept] = {
-                "total": 0,
-                "approved": 0,
-                "rejected": 0,
-                "pending": 0
-            }
-        department_stats[dept]["total"] += 1
-        if r.status == "APPROVED":
-            department_stats[dept]["approved"] += 1
-        elif r.status == "REJECTED":
-            department_stats[dept]["rejected"] += 1
-        else:
-            department_stats[dept]["pending"] += 1
+    overdue_count = sum(1 for r in day_requests if r.is_overdue)
 
+    department_stats = _calculate_department_stats(day_requests)
     change_type_stats = {}
     for r in day_requests:
         ctype = r.change_type or "其他"
@@ -85,7 +70,8 @@ def generate_daily_report(db: Session, report_date: date = None) -> DailyReport:
         avg_processing_hours=round(avg_processing_hours, 2),
         department_stats=dict_to_json(department_stats),
         change_type_stats=dict_to_json(change_type_stats),
-        risk_warning_count=risk_count
+        risk_warning_count=risk_count,
+        overdue_count=overdue_count
     )
 
     db.add(report)
@@ -111,21 +97,91 @@ def generate_daily_report(db: Session, report_date: date = None) -> DailyReport:
     return report
 
 
-def get_7day_trend(db: Session, end_date: date = None) -> dict:
+def _calculate_department_stats(requests: list) -> dict:
+    """计算各部门详细统计：申请量、通过率、同步成功率、平均处理时长"""
+    dept_stats = {}
+    for r in requests:
+        dept = r.department or "未分配"
+        if dept not in dept_stats:
+            dept_stats[dept] = {
+                "total": 0,
+                "approved": 0,
+                "rejected": 0,
+                "pending": 0,
+                "approval_rate": 0.0,
+                "sync_success": 0,
+                "sync_total": 0,
+                "sync_success_rate": 0.0,
+                "processing_hours": [],
+                "avg_processing_hours": 0.0,
+                "overdue_count": 0
+            }
+
+        stats = dept_stats[dept]
+        stats["total"] += 1
+
+        if r.status == "APPROVED":
+            stats["approved"] += 1
+            stats["sync_total"] += 1
+            if r.sync_status == "SUCCESS":
+                stats["sync_success"] += 1
+
+            if r.approved_at and r.created_at:
+                delta = r.approved_at - r.created_at
+                stats["processing_hours"].append(delta.total_seconds() / 3600)
+        elif r.status == "REJECTED":
+            stats["rejected"] += 1
+        else:
+            stats["pending"] += 1
+
+        if r.is_overdue:
+            stats["overdue_count"] += 1
+
+    for dept, stats in dept_stats.items():
+        stats["approval_rate"] = round(
+            stats["approved"] / stats["total"] * 100, 2
+        ) if stats["total"] > 0 else 0.0
+        stats["sync_success_rate"] = round(
+            stats["sync_success"] / stats["sync_total"] * 100, 2
+        ) if stats["sync_total"] > 0 else 0.0
+        stats["avg_processing_hours"] = round(
+            sum(stats["processing_hours"]) / len(stats["processing_hours"]), 2
+        ) if stats["processing_hours"] else 0.0
+        del stats["processing_hours"]
+
+    return dept_stats
+
+
+def get_7day_trend(db: Session, end_date: date = None) -> list:
+    return get_trend_data(db, days=7, end_date=end_date)
+
+
+def get_30day_trend(db: Session, end_date: date = None) -> list:
+    return get_trend_data(db, days=30, end_date=end_date)
+
+
+def get_trend_data(db: Session, days: int = 7, end_date: date = None) -> list:
+    """获取N天趋势数据"""
     if end_date is None:
         end_date = date.today() - timedelta(days=1)
 
     trend_data = []
-    for i in range(6, -1, -1):
+    for i in range(days - 1, -1, -1):
         d = end_date - timedelta(days=i)
         report = db.query(DailyReport).filter(DailyReport.report_date == d).first()
         if report:
+            dept_stats = json_to_dict(report.department_stats)
             trend_data.append({
                 "date": d.strftime("%Y-%m-%d"),
                 "total_requests": report.total_requests,
                 "approved_count": report.approved_count,
                 "approval_rate": report.approval_rate,
-                "sync_success_rate": report.sync_success_rate
+                "sync_success_count": report.sync_success_count,
+                "sync_success_rate": report.sync_success_rate,
+                "avg_processing_hours": report.avg_processing_hours,
+                "risk_warning_count": report.risk_warning_count,
+                "overdue_count": report.overdue_count,
+                "department_count": len(dept_stats)
             })
         else:
             trend_data.append({
@@ -133,7 +189,12 @@ def get_7day_trend(db: Session, end_date: date = None) -> dict:
                 "total_requests": 0,
                 "approved_count": 0,
                 "approval_rate": 0,
-                "sync_success_rate": 0
+                "sync_success_count": 0,
+                "sync_success_rate": 0,
+                "avg_processing_hours": 0,
+                "risk_warning_count": 0,
+                "overdue_count": 0,
+                "department_count": 0
             })
 
     return trend_data
@@ -145,9 +206,19 @@ def generate_pdf_report(report: DailyReport) -> str:
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import cm
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+    import platform
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+
+    system_name = platform.system()
+    if system_name == "Windows":
+        plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei']
+    elif system_name == "Darwin":
+        plt.rcParams['font.sans-serif'] = ['Arial Unicode MS']
+    else:
+        plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
 
     pdf_path = os.path.join(REPORTS_DIR, f"daily_report_{report.report_date}.pdf")
 
@@ -174,7 +245,8 @@ def generate_pdf_report(report: DailyReport) -> str:
         ["同步成功数", str(report.sync_success_count)],
         ["同步成功率", f"{report.sync_success_rate}%"],
         ["平均处理时长(小时)", str(report.avg_processing_hours)],
-        ["风控预警数", str(report.risk_warning_count)]
+        ["风控预警数", str(report.risk_warning_count)],
+        ["超时申请数", str(report.overdue_count)]
     ]
 
     summary_table = Table(summary_data, colWidths=[8 * cm, 6 * cm])
@@ -189,34 +261,36 @@ def generate_pdf_report(report: DailyReport) -> str:
         ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#D9D9D9'))
     ]))
     story.append(summary_table)
-    story.append(Spacer(1, 1 * cm))
+    story.append(Spacer(1, 0.8 * cm))
 
-    chart_path = _generate_trend_chart(report.report_date)
-    if chart_path:
+    chart_7d_path = _generate_trend_chart_png(report.report_date, 7)
+    if chart_7d_path:
         story.append(Paragraph("7日趋势图", subtitle_style))
-        img = Image(chart_path, width=16 * cm, height=8 * cm)
+        img = Image(chart_7d_path, width=16 * cm, height=8 * cm)
         story.append(img)
         story.append(Spacer(1, 0.5 * cm))
 
     dept_stats = json_to_dict(report.department_stats)
     if dept_stats:
-        story.append(Paragraph("各部门统计", subtitle_style))
-        dept_data = [["部门", "申请数", "通过数", "驳回数", "待审批"]]
+        story.append(Paragraph("各部门详细统计", subtitle_style))
+        dept_data = [["部门", "申请数", "通过数", "通过率", "同步成功率", "平均时长(h)", "超时数"]]
         for dept, stats in dept_stats.items():
             dept_data.append([
                 dept,
                 str(stats["total"]),
                 str(stats["approved"]),
-                str(stats["rejected"]),
-                str(stats["pending"])
+                f"{stats['approval_rate']}%",
+                f"{stats['sync_success_rate']}%",
+                str(stats["avg_processing_hours"]),
+                str(stats["overdue_count"])
             ])
-        dept_table = Table(dept_data, colWidths=[5 * cm, 2.5 * cm, 2.5 * cm, 2.5 * cm, 2.5 * cm])
+        dept_table = Table(dept_data, colWidths=[3.5 * cm, 2 * cm, 2 * cm, 2 * cm, 2.5 * cm, 2.5 * cm, 1.5 * cm])
         dept_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#70AD47')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
             ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#D9D9D9'))
         ]))
         story.append(dept_table)
@@ -226,7 +300,7 @@ def generate_pdf_report(report: DailyReport) -> str:
     return pdf_path
 
 
-def _generate_trend_chart(report_date: date) -> str:
+def _generate_trend_chart_png(report_date: date, days: int = 7) -> str:
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -245,7 +319,7 @@ def _generate_trend_chart(report_date: date) -> str:
 
     db = SessionLocal()
     try:
-        trend = get_7day_trend(db, report_date)
+        trend = get_trend_data(db, days=days, end_date=report_date)
     finally:
         db.close()
 
@@ -255,10 +329,11 @@ def _generate_trend_chart(report_date: date) -> str:
     dates = [d["date"][5:] for d in trend]
     totals = [d["total_requests"] for d in trend]
     approved = [d["approved_count"] for d in trend]
+    approval_rates = [d["approval_rate"] for d in trend]
 
-    chart_path = os.path.join(REPORTS_DIR, f"trend_{report_date}.png")
+    chart_path = os.path.join(REPORTS_DIR, f"trend_{days}d_{report_date}.png")
 
-    fig, ax1 = plt.subplots(figsize=(10, 5))
+    fig, ax1 = plt.subplots(figsize=(12, 5))
 
     bar_width = 0.35
     x = range(len(dates))
@@ -269,11 +344,16 @@ def _generate_trend_chart(report_date: date) -> str:
             label='通过数', color='#70AD47', alpha=0.8)
 
     ax1.set_xlabel('日期')
-    ax1.set_ylabel('数量')
-    ax1.set_title('7日申请趋势')
+    ax1.set_ylabel('申请数量')
+    ax1.set_title(f'{days}日申请趋势')
     ax1.set_xticks(x)
     ax1.set_xticklabels(dates)
     ax1.legend(loc='upper left')
+
+    ax2 = ax1.twinx()
+    ax2.plot(x, approval_rates, color='#ED7D31', marker='o', linewidth=2, label='通过率(%)')
+    ax2.set_ylabel('通过率(%)')
+    ax2.legend(loc='upper right')
 
     plt.tight_layout()
     plt.savefig(chart_path, dpi=100, bbox_inches='tight')
@@ -285,7 +365,7 @@ def _generate_trend_chart(report_date: date) -> str:
 def generate_excel_report(report: DailyReport) -> str:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.chart import BarChart, Reference
+    from openpyxl.chart import BarChart, LineChart, Reference
 
     excel_path = os.path.join(REPORTS_DIR, f"daily_report_{report.report_date}.xlsx")
 
@@ -317,7 +397,8 @@ def generate_excel_report(report: DailyReport) -> str:
         ("同步成功数", report.sync_success_count),
         ("同步成功率(%)", report.sync_success_rate),
         ("平均处理时长(小时)", report.avg_processing_hours),
-        ("风控预警数", report.risk_warning_count)
+        ("风控预警数", report.risk_warning_count),
+        ("超时申请数", report.overdue_count)
     ]
 
     for row_idx, (key, value) in enumerate(summary_data, start=3):
@@ -342,7 +423,8 @@ def generate_excel_report(report: DailyReport) -> str:
     ws2 = wb.create_sheet("部门统计")
     dept_stats = json_to_dict(report.department_stats)
 
-    headers = ["部门", "申请数", "通过数", "驳回数", "待审批"]
+    headers = ["部门", "申请数", "通过数", "驳回数", "待审批",
+               "通过率(%)", "同步成功数", "同步成功率(%)", "平均时长(h)", "超时数"]
     for col, header in enumerate(headers, 1):
         cell = ws2.cell(row=1, column=col, value=header)
         cell.font = header_font
@@ -351,19 +433,25 @@ def generate_excel_report(report: DailyReport) -> str:
         cell.border = thin_border
 
     for row_idx, (dept, stats) in enumerate(dept_stats.items(), start=2):
-        ws2.cell(row=row_idx, column=1, value=dept)
-        ws2.cell(row=row_idx, column=2, value=stats["total"])
-        ws2.cell(row=row_idx, column=3, value=stats["approved"])
-        ws2.cell(row=row_idx, column=4, value=stats["rejected"])
-        ws2.cell(row=row_idx, column=5, value=stats["pending"])
-        for col in range(1, 6):
-            cell = ws2.cell(row=row_idx, column=col)
+        row_data = [
+            dept,
+            stats["total"],
+            stats["approved"],
+            stats["rejected"],
+            stats["pending"],
+            stats["approval_rate"],
+            stats["sync_success"],
+            stats["sync_success_rate"],
+            stats["avg_processing_hours"],
+            stats["overdue_count"]
+        ]
+        for col, value in enumerate(row_data, 1):
+            cell = ws2.cell(row=row_idx, column=col, value=value)
             cell.border = thin_border
             cell.alignment = center_align
 
-    ws2.column_dimensions['A'].width = 20
-    for col in ['B', 'C', 'D', 'E']:
-        ws2.column_dimensions[col].width = 12
+    for col_idx, width in enumerate([20, 10, 10, 10, 10, 12, 12, 12, 12, 10], 1):
+        ws2.column_dimensions[chr(64 + col_idx) if col_idx <= 26 else 'A' + chr(64 + col_idx - 26)].width = width
 
     if dept_stats:
         chart = BarChart()
@@ -377,8 +465,9 @@ def generate_excel_report(report: DailyReport) -> str:
         cats = Reference(ws2, min_col=1, min_row=2, max_row=len(dept_stats) + 1)
         chart.add_data(data, titles_from_data=True)
         chart.set_categories(cats)
-        chart.shape = 4
-        ws2.add_chart(chart, "G2")
+        chart.width = 20
+        chart.height = 10
+        ws2.add_chart(chart, "L2")
 
     ws3 = wb.create_sheet("变更类型统计")
     type_stats = json_to_dict(report.change_type_stats)
@@ -419,3 +508,28 @@ def get_reports_list(db: Session, page: int = 1, page_size: int = 20) -> dict:
 
 def get_report_by_date(db: Session, report_date: date) -> DailyReport:
     return db.query(DailyReport).filter(DailyReport.report_date == report_date).first()
+
+
+def get_report_detail(db: Session, report_date: date) -> dict:
+    """获取日报详情，包含部门统计结构化数据"""
+    report = get_report_by_date(db, report_date)
+    if not report:
+        return None
+
+    return {
+        "id": report.id,
+        "report_date": report.report_date,
+        "total_requests": report.total_requests,
+        "approved_count": report.approved_count,
+        "approval_rate": report.approval_rate,
+        "sync_success_count": report.sync_success_count,
+        "sync_success_rate": report.sync_success_rate,
+        "avg_processing_hours": report.avg_processing_hours,
+        "risk_warning_count": report.risk_warning_count,
+        "overdue_count": report.overdue_count,
+        "department_stats": json_to_dict(report.department_stats),
+        "change_type_stats": json_to_dict(report.change_type_stats),
+        "pdf_path": report.pdf_path,
+        "excel_path": report.excel_path,
+        "created_at": report.created_at
+    }

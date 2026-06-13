@@ -1,7 +1,7 @@
 import os
 import json
 from io import BytesIO
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from app.models import ChangeRequest, OperationLog, Customer
@@ -12,7 +12,33 @@ EXPORT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.pat
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
 
-def export_change_requests_excel(db: Session, query: ChangeRequestQuery) -> str:
+def _get_date_range(quick_range: str = None, start_date: date = None, end_date: date = None):
+    """统一日期范围计算口径"""
+    if quick_range:
+        today = date.today()
+        if quick_range == "today":
+            start_dt = datetime.combine(today, datetime.min.time())
+            end_dt = datetime.combine(today, datetime.max.time())
+        elif quick_range == "yesterday":
+            yesterday = today - timedelta(days=1)
+            start_dt = datetime.combine(yesterday, datetime.min.time())
+            end_dt = datetime.combine(yesterday, datetime.max.time())
+        elif quick_range == "7d":
+            start_dt = datetime.combine(today - timedelta(days=6), datetime.min.time())
+            end_dt = datetime.combine(today, datetime.max.time())
+        elif quick_range == "30d":
+            start_dt = datetime.combine(today - timedelta(days=29), datetime.min.time())
+            end_dt = datetime.combine(today, datetime.max.time())
+        else:
+            start_dt, end_dt = None, None
+    else:
+        start_dt = datetime.combine(start_date, datetime.min.time()) if start_date else None
+        end_dt = datetime.combine(end_date, datetime.max.time()) if end_date else None
+
+    return start_dt, end_dt
+
+
+def export_change_requests_excel(db: Session, query: ChangeRequestQuery, quick_range: str = None) -> str:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -27,11 +53,15 @@ def export_change_requests_excel(db: Session, query: ChangeRequestQuery) -> str:
             )
         )
 
-    if query.start_date:
-        query_stmt = query_stmt.filter(ChangeRequest.created_at >= query.start_date)
-
-    if query.end_date:
-        query_stmt = query_stmt.filter(ChangeRequest.created_at <= query.end_date)
+    start_dt, end_dt = _get_date_range(
+        quick_range=quick_range,
+        start_date=query.start_date,
+        end_date=query.end_date
+    )
+    if start_dt:
+        query_stmt = query_stmt.filter(ChangeRequest.created_at >= start_dt)
+    if end_dt:
+        query_stmt = query_stmt.filter(ChangeRequest.created_at <= end_dt)
 
     if query.status:
         query_stmt = query_stmt.filter(ChangeRequest.status == query.status)
@@ -112,17 +142,22 @@ def export_change_requests_excel(db: Session, query: ChangeRequestQuery) -> str:
 
 
 def export_operation_logs_excel(db: Session, start_date: date = None, end_date: date = None,
-                                 operator: str = None, operation_type: str = None) -> str:
+                                 operator: str = None, operation_type: str = None,
+                                 quick_range: str = None) -> str:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
     query = db.query(OperationLog)
 
-    if start_date:
-        query = query.filter(OperationLog.created_at >= start_date)
-
-    if end_date:
-        query = query.filter(OperationLog.created_at <= end_date)
+    start_dt, end_dt = _get_date_range(
+        quick_range=quick_range,
+        start_date=start_date,
+        end_date=end_date
+    )
+    if start_dt:
+        query = query.filter(OperationLog.created_at >= start_dt)
+    if end_dt:
+        query = query.filter(OperationLog.created_at <= end_dt)
 
     if operator:
         query = query.filter(OperationLog.operator == operator)
