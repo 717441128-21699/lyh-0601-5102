@@ -46,6 +46,15 @@ def init_approval_flow(db: Session, change_request: ChangeRequest, customer: Cus
     if not first_node_info["has_next"]:
         change_request.status = "APPROVED"
         change_request.approved_at = datetime.now()
+    else:
+        send_notification(
+            db,
+            change_request_id=change_request.id,
+            recipient=first_node_info.get("approver", ""),
+            notification_type="APPROVAL_TODO",
+            title="您有新的待审批申请",
+            content=f"变更申请 {change_request.request_no} 已提交，请及时处理。"
+        )
 
     db.flush()
 
@@ -69,9 +78,6 @@ def approve_request(db: Session, request_id: int, approver: str,
 
     if change_request.status != "PENDING":
         raise ValueError(f"当前状态为 {change_request.status}，无法审批")
-
-    if change_request.risk_triggered:
-        raise ValueError("该申请触发风控预警，需先处理风控后再审批")
 
     current_index = change_request.current_node_index
     chain = change_request.approval_chain
@@ -397,10 +403,10 @@ def get_todo_stats(db: Session, approver: str = None, role: str = None,
     }
 
 
-def check_and_update_overdue(db: Session) -> int:
+def check_and_update_overdue(db: Session) -> dict:
     """
-    检查并更新超时的审批申请
-    遍历所有待审批的申请，判断当前节点是否超时
+    检查并更新超时的审批申请，发送超时催办通知
+    返回: {"new_overdue": 新增超时数量, "notifications_sent": 发送通知数量}
     """
     from app.models import ApprovalChain
 
@@ -408,7 +414,8 @@ def check_and_update_overdue(db: Session) -> int:
         ChangeRequest.status == "PENDING"
     ).all()
 
-    overdue_count = 0
+    new_overdue = 0
+    notifications_sent = 0
     now = datetime.now()
 
     for req in pending_requests:
@@ -438,7 +445,7 @@ def check_and_update_overdue(db: Session) -> int:
         if delta_hours > current_node.timeout_hours:
             if not req.is_overdue:
                 req.is_overdue = True
-                overdue_count += 1
+                new_overdue += 1
 
                 current_record = db.query(ApprovalRecord).filter(
                     and_(
@@ -457,9 +464,13 @@ def check_and_update_overdue(db: Session) -> int:
                     title="审批申请超时提醒",
                     content=f"变更申请 {req.request_no} 已超过 {current_node.timeout_hours} 小时未处理，请尽快审批！"
                 )
+                notifications_sent += 1
 
     db.commit()
-    return overdue_count
+    return {
+        "new_overdue": new_overdue,
+        "notifications_sent": notifications_sent
+    }
 
 
 def auto_approve_if_applicable(db: Session, change_request: ChangeRequest):

@@ -10,7 +10,8 @@ from app.services.utils import (
     json_to_dict,
     calculate_diff,
     customer_to_dict,
-    log_operation
+    log_operation,
+    get_date_range
 )
 from app.services.risk_service import check_risk_and_freeze
 from app.services.approval_service import init_approval_flow, get_approval_records
@@ -74,7 +75,7 @@ def submit_change_request(db: Session, request_data: ChangeRequestCreate,
     )
 
     risk_result = check_risk_and_freeze(db, customer.id)
-    if risk_result["triggered"]:
+    if risk_result["frozen"]:
         change_request.risk_triggered = True
         change_request.risk_reason = risk_result["reason"]
         change_request.status = "RISK_HOLD"
@@ -87,9 +88,14 @@ def submit_change_request(db: Session, request_data: ChangeRequestCreate,
         return {
             "request": format_change_request_response(change_request),
             "risk_triggered": True,
+            "risk_frozen": True,
             "risk_reason": risk_result["reason"],
             "approval_flow": None
         }
+    elif risk_result["triggered"] and not risk_result["frozen"]:
+        change_request.risk_triggered = True
+        change_request.risk_reason = risk_result["reason"]
+        db.flush()
 
     approval_result = init_approval_flow(db, change_request, customer, len(diff_fields))
 
@@ -147,7 +153,8 @@ def _format_approval_records(records: List) -> List[Dict]:
     return result
 
 
-def query_change_requests(db: Session, query: ChangeRequestQuery) -> Dict[str, Any]:
+def query_change_requests(db: Session, query: ChangeRequestQuery,
+                          quick_range: str = None) -> Dict[str, Any]:
     query_stmt = db.query(ChangeRequest)
 
     if query.customer_name:
@@ -159,12 +166,14 @@ def query_change_requests(db: Session, query: ChangeRequestQuery) -> Dict[str, A
             )
         )
 
-    if query.start_date:
-        start_dt = datetime.combine(query.start_date, datetime.min.time())
+    start_dt, end_dt = get_date_range(
+        quick_range=quick_range,
+        start_date=query.start_date,
+        end_date=query.end_date
+    )
+    if start_dt:
         query_stmt = query_stmt.filter(ChangeRequest.created_at >= start_dt)
-
-    if query.end_date:
-        end_dt = datetime.combine(query.end_date, datetime.max.time())
+    if end_dt:
         query_stmt = query_stmt.filter(ChangeRequest.created_at <= end_dt)
 
     if query.status:
@@ -194,33 +203,19 @@ def query_change_requests_quick(db: Session, quick_range: str = None,
                                 page_size: int = 20) -> Dict[str, Any]:
     """
     快捷查询：支持最近7天、最近30天等快捷范围
+    与 query_change_requests 使用同一套日期口径
     """
-    today = date.today()
-    start_date = None
-
-    if quick_range == "7d":
-        start_date = today - timedelta(days=7)
-    elif quick_range == "30d":
-        start_date = today - timedelta(days=30)
-    elif quick_range == "today":
-        start_date = today
-    elif quick_range == "yesterday":
-        start_date = today - timedelta(days=1)
-
     query_obj = ChangeRequestQuery(
         customer_name=customer_name,
-        start_date=start_date,
-        end_date=today if quick_range in ["today", "yesterday"] else None,
+        start_date=None,
+        end_date=None,
         status=status,
         department=department,
         page=page,
         page_size=page_size
     )
 
-    if quick_range == "yesterday":
-        query_obj.end_date = start_date
-
-    return query_change_requests(db, query_obj)
+    return query_change_requests(db, query_obj, quick_range=quick_range)
 
 
 def get_change_count_30d(db: Session, customer_id: int) -> int:

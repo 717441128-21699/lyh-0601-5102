@@ -90,28 +90,12 @@ def list_operation_logs(
 ):
     query = db.query(OperationLog)
 
-    from datetime import datetime, timedelta
-    if quick_range:
-        today = date.today()
-        if quick_range == "today":
-            start_dt = datetime.combine(today, datetime.min.time())
-            end_dt = datetime.combine(today, datetime.max.time())
-        elif quick_range == "yesterday":
-            yesterday = today - timedelta(days=1)
-            start_dt = datetime.combine(yesterday, datetime.min.time())
-            end_dt = datetime.combine(yesterday, datetime.max.time())
-        elif quick_range == "7d":
-            start_dt = datetime.combine(today - timedelta(days=6), datetime.min.time())
-            end_dt = datetime.combine(today, datetime.max.time())
-        elif quick_range == "30d":
-            start_dt = datetime.combine(today - timedelta(days=29), datetime.min.time())
-            end_dt = datetime.combine(today, datetime.max.time())
-        else:
-            start_dt, end_dt = None, None
-    else:
-        start_dt = datetime.combine(start_date, datetime.min.time()) if start_date else None
-        end_dt = datetime.combine(end_date, datetime.max.time()) if end_date else None
-
+    from app.services.utils import get_date_range
+    start_dt, end_dt = get_date_range(
+        quick_range=quick_range,
+        start_date=start_date,
+        end_date=end_date
+    )
     if start_dt:
         query = query.filter(OperationLog.created_at >= start_dt)
     if end_dt:

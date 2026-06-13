@@ -270,6 +270,13 @@ def generate_pdf_report(report: DailyReport) -> str:
         story.append(img)
         story.append(Spacer(1, 0.5 * cm))
 
+    chart_30d_path = _generate_trend_chart_png(report.report_date, 30)
+    if chart_30d_path:
+        story.append(Paragraph("30日趋势图", subtitle_style))
+        img = Image(chart_30d_path, width=16 * cm, height=8 * cm)
+        story.append(img)
+        story.append(Spacer(1, 0.5 * cm))
+
     dept_stats = json_to_dict(report.department_stats)
     if dept_stats:
         story.append(Paragraph("各部门详细统计", subtitle_style))
@@ -485,6 +492,103 @@ def generate_excel_report(report: DailyReport) -> str:
 
     ws3.column_dimensions['A'].width = 20
     ws3.column_dimensions['B'].width = 15
+
+    from app.database import SessionLocal
+    db_session = SessionLocal()
+    try:
+        trend_7d = get_trend_data(db_session, days=7, end_date=report.report_date)
+        trend_30d = get_trend_data(db_session, days=30, end_date=report.report_date)
+    finally:
+        db_session.close()
+
+    ws4 = wb.create_sheet("7日趋势")
+    trend_headers = ["日期", "申请总数", "通过数", "通过率(%)", "同步成功数", "同步成功率(%)", "平均时长(h)", "风控预警数", "超时数"]
+    for col, header in enumerate(trend_headers, 1):
+        cell = ws4.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = thin_border
+
+    for row_idx, item in enumerate(trend_7d, start=2):
+        row_data = [
+            item["date"],
+            item["total_requests"],
+            item["approved_count"],
+            item["approval_rate"],
+            item["sync_success_count"],
+            item["sync_success_rate"],
+            item["avg_processing_hours"],
+            item["risk_warning_count"],
+            item["overdue_count"]
+        ]
+        for col, value in enumerate(row_data, 1):
+            cell = ws4.cell(row=row_idx, column=col, value=value)
+            cell.border = thin_border
+            cell.alignment = center_align
+
+    for col_idx, width in enumerate([12, 10, 10, 12, 12, 14, 12, 12, 10], 1):
+        ws4.column_dimensions[chr(64 + col_idx) if col_idx <= 26 else 'A' + chr(64 + col_idx - 26)].width = width
+
+    if trend_7d:
+        chart7 = BarChart()
+        chart7.type = "col"
+        chart7.style = 10
+        chart7.title = "7日申请趋势"
+        chart7.y_axis.title = '数量'
+        chart7.x_axis.title = '日期'
+
+        data = Reference(ws4, min_col=2, min_row=1, max_row=len(trend_7d) + 1, max_col=3)
+        cats = Reference(ws4, min_col=1, min_row=2, max_row=len(trend_7d) + 1)
+        chart7.add_data(data, titles_from_data=True)
+        chart7.set_categories(cats)
+        chart7.width = 20
+        chart7.height = 10
+        ws4.add_chart(chart7, "K2")
+
+    ws5 = wb.create_sheet("30日趋势")
+    for col, header in enumerate(trend_headers, 1):
+        cell = ws5.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = thin_border
+
+    for row_idx, item in enumerate(trend_30d, start=2):
+        row_data = [
+            item["date"],
+            item["total_requests"],
+            item["approved_count"],
+            item["approval_rate"],
+            item["sync_success_count"],
+            item["sync_success_rate"],
+            item["avg_processing_hours"],
+            item["risk_warning_count"],
+            item["overdue_count"]
+        ]
+        for col, value in enumerate(row_data, 1):
+            cell = ws5.cell(row=row_idx, column=col, value=value)
+            cell.border = thin_border
+            cell.alignment = center_align
+
+    for col_idx, width in enumerate([12, 10, 10, 12, 12, 14, 12, 12, 10], 1):
+        ws5.column_dimensions[chr(64 + col_idx) if col_idx <= 26 else 'A' + chr(64 + col_idx - 26)].width = width
+
+    if trend_30d:
+        chart30 = BarChart()
+        chart30.type = "col"
+        chart30.style = 10
+        chart30.title = "30日申请趋势"
+        chart30.y_axis.title = '数量'
+        chart30.x_axis.title = '日期'
+
+        data = Reference(ws5, min_col=2, min_row=1, max_row=len(trend_30d) + 1, max_col=3)
+        cats = Reference(ws5, min_col=1, min_row=2, max_row=len(trend_30d) + 1)
+        chart30.add_data(data, titles_from_data=True)
+        chart30.set_categories(cats)
+        chart30.width = 30
+        chart30.height = 10
+        ws5.add_chart(chart30, "K2")
 
     wb.save(excel_path)
     return excel_path

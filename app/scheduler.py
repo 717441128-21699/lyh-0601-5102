@@ -15,7 +15,9 @@ def daily_report_job():
     logger.info("开始生成每日报告...")
     db = SessionLocal()
     try:
-        report = generate_daily_report(db, report_date=date.today())
+        from datetime import timedelta
+        report_date = date.today() - timedelta(days=1)
+        report = generate_daily_report(db, report_date=report_date)
         logger.info(f"日报生成成功: {report.report_date}")
     except Exception as e:
         logger.error(f"日报生成失败: {e}")

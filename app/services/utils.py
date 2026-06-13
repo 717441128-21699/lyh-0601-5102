@@ -1,8 +1,41 @@
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from sqlalchemy.orm import Session
 from app.models import OperationLog
+
+
+def get_date_range(quick_range: str = None, start_date: date = None, end_date: date = None):
+    """
+    统一日期范围计算口径
+    - today: 今天 00:00:00 ~ 今天 23:59:59.999999
+    - yesterday: 昨天 00:00:00 ~ 昨天 23:59:59.999999
+    - 7d: 最近7天（含今天）: 6天前 00:00:00 ~ 今天 23:59:59.999999
+    - 30d: 最近30天（含今天）: 29天前 00:00:00 ~ 今天 23:59:59.999999
+    """
+    today = date.today()
+
+    if quick_range:
+        if quick_range == "today":
+            start_dt = datetime.combine(today, datetime.min.time())
+            end_dt = datetime.combine(today, datetime.max.time())
+        elif quick_range == "yesterday":
+            yesterday = today - timedelta(days=1)
+            start_dt = datetime.combine(yesterday, datetime.min.time())
+            end_dt = datetime.combine(yesterday, datetime.max.time())
+        elif quick_range == "7d":
+            start_dt = datetime.combine(today - timedelta(days=6), datetime.min.time())
+            end_dt = datetime.combine(today, datetime.max.time())
+        elif quick_range == "30d":
+            start_dt = datetime.combine(today - timedelta(days=29), datetime.min.time())
+            end_dt = datetime.combine(today, datetime.max.time())
+        else:
+            start_dt, end_dt = None, None
+    else:
+        start_dt = datetime.combine(start_date, datetime.min.time()) if start_date else None
+        end_dt = datetime.combine(end_date, datetime.max.time()) if end_date else None
+
+    return start_dt, end_dt
 
 
 def generate_request_no():

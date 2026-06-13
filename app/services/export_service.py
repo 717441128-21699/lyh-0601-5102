@@ -1,41 +1,15 @@
 import os
 import json
 from io import BytesIO
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from app.models import ChangeRequest, OperationLog, Customer
 from app.schemas import ChangeRequestQuery
-from app.services.utils import json_to_dict
+from app.services.utils import json_to_dict, get_date_range
 
 EXPORT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "exports")
 os.makedirs(EXPORT_DIR, exist_ok=True)
-
-
-def _get_date_range(quick_range: str = None, start_date: date = None, end_date: date = None):
-    """统一日期范围计算口径"""
-    if quick_range:
-        today = date.today()
-        if quick_range == "today":
-            start_dt = datetime.combine(today, datetime.min.time())
-            end_dt = datetime.combine(today, datetime.max.time())
-        elif quick_range == "yesterday":
-            yesterday = today - timedelta(days=1)
-            start_dt = datetime.combine(yesterday, datetime.min.time())
-            end_dt = datetime.combine(yesterday, datetime.max.time())
-        elif quick_range == "7d":
-            start_dt = datetime.combine(today - timedelta(days=6), datetime.min.time())
-            end_dt = datetime.combine(today, datetime.max.time())
-        elif quick_range == "30d":
-            start_dt = datetime.combine(today - timedelta(days=29), datetime.min.time())
-            end_dt = datetime.combine(today, datetime.max.time())
-        else:
-            start_dt, end_dt = None, None
-    else:
-        start_dt = datetime.combine(start_date, datetime.min.time()) if start_date else None
-        end_dt = datetime.combine(end_date, datetime.max.time()) if end_date else None
-
-    return start_dt, end_dt
 
 
 def export_change_requests_excel(db: Session, query: ChangeRequestQuery, quick_range: str = None) -> str:
@@ -53,7 +27,7 @@ def export_change_requests_excel(db: Session, query: ChangeRequestQuery, quick_r
             )
         )
 
-    start_dt, end_dt = _get_date_range(
+    start_dt, end_dt = get_date_range(
         quick_range=quick_range,
         start_date=query.start_date,
         end_date=query.end_date
@@ -149,7 +123,7 @@ def export_operation_logs_excel(db: Session, start_date: date = None, end_date: 
 
     query = db.query(OperationLog)
 
-    start_dt, end_dt = _get_date_range(
+    start_dt, end_dt = get_date_range(
         quick_range=quick_range,
         start_date=start_date,
         end_date=end_date
