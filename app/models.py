@@ -39,6 +39,9 @@ class ChangeRequest(Base):
     diff_data = Column(Text)
     status = Column(String(20), default="PENDING")
     priority = Column(String(20), default="NORMAL")
+    urgency = Column(String(20), default="NORMAL")
+    matched_rule_id = Column(Integer, ForeignKey("approval_rules.id"))
+    matched_rule_name = Column(String(200))
     approval_chain_id = Column(Integer, ForeignKey("approval_chains.id"))
     current_node_index = Column(Integer, default=0)
     approval_level = Column(String(50))
@@ -50,14 +53,18 @@ class ChangeRequest(Base):
     risk_reason = Column(String(500))
     sync_status = Column(String(20), default="PENDING")
     synced_at = Column(DateTime)
+    order_manager_notified = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     customer = relationship("Customer", backref="change_requests")
     approval_chain = relationship("ApprovalChain", backref="change_requests")
+    matched_rule = relationship("ApprovalRule")
     approval_records = relationship("ApprovalRecord", back_populates="change_request", order_by="ApprovalRecord.node_order")
     sync_records = relationship("SyncRecord", back_populates="change_request")
     notifications = relationship("Notification", back_populates="change_request")
+    assignments = relationship("ApprovalAssignment", back_populates="change_request")
+    reminders = relationship("ApprovalReminder", back_populates="change_request")
 
 
 class SyncRecord(Base):
@@ -82,10 +89,14 @@ class Notification(Base):
     id = Column(Integer, primary_key=True, index=True)
     change_request_id = Column(Integer, ForeignKey("change_requests.id"), nullable=False)
     recipient = Column(String(100))
+    recipient_role = Column(String(50))
+    recipient_department = Column(String(100))
     notification_type = Column(String(50))
     title = Column(String(200))
     content = Column(Text)
     is_read = Column(Boolean, default=False)
+    is_delivered = Column(Boolean, default=True)
+    delivered_at = Column(DateTime, default=datetime.now)
     sent_at = Column(DateTime, default=datetime.now)
 
     change_request = relationship("ChangeRequest", back_populates="notifications")
@@ -200,6 +211,11 @@ class ApprovalRecord(Base):
     node_order = Column(Integer, default=0)
     approver_role = Column(String(50))
     approver = Column(String(100))
+    assignee = Column(String(100))
+    candidate_users = Column(Text)
+    claimed_at = Column(DateTime)
+    claimed_by = Column(String(100))
+    assignment_type = Column(String(20))
     action = Column(String(20))
     comment = Column(String(500))
     approved_at = Column(DateTime)
@@ -208,3 +224,84 @@ class ApprovalRecord(Base):
 
     change_request = relationship("ChangeRequest", back_populates="approval_records")
     node = relationship("ApprovalNode")
+
+
+class ApprovalCandidate(Base):
+    __tablename__ = "approval_candidates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    role = Column(String(50), index=True)
+    department = Column(String(100), index=True)
+    username = Column(String(100), nullable=False)
+    real_name = Column(String(100), nullable=False)
+    email = Column(String(100))
+    phone = Column(String(50))
+    is_active = Column(Boolean, default=True)
+    is_default = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        {'sqlite_autoincrement': True},
+    )
+
+
+class ApprovalAssignment(Base):
+    __tablename__ = "approval_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    change_request_id = Column(Integer, ForeignKey("change_requests.id"), nullable=False)
+    approval_record_id = Column(Integer, ForeignKey("approval_records.id"))
+    node_order = Column(Integer, default=0)
+    assignment_type = Column(String(20))
+    from_user = Column(String(100))
+    to_user = Column(String(100), nullable=False)
+    reason = Column(String(500))
+    operator = Column(String(100))
+    created_at = Column(DateTime, default=datetime.now)
+
+    change_request = relationship("ChangeRequest", back_populates="assignments")
+    approval_record = relationship("ApprovalRecord")
+
+
+class ApprovalReminder(Base):
+    __tablename__ = "approval_reminders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    change_request_id = Column(Integer, ForeignKey("change_requests.id"), nullable=False)
+    approval_record_id = Column(Integer, ForeignKey("approval_records.id"))
+    reminder_type = Column(String(20))
+    reminder_level = Column(String(20), default="NORMAL")
+    target_user = Column(String(100), nullable=False)
+    operator = Column(String(100))
+    reason = Column(String(500))
+    is_escalated = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.now)
+
+    change_request = relationship("ChangeRequest", back_populates="reminders")
+    approval_record = relationship("ApprovalRecord")
+
+
+class RiskCase(Base):
+    __tablename__ = "risk_cases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    case_no = Column(String(50), unique=True, index=True, nullable=False)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=False)
+    customer_code = Column(String(50), index=True)
+    risk_type = Column(String(50))
+    risk_level = Column(String(20))
+    status = Column(String(20), default="OPEN")
+    description = Column(String(500))
+    related_warning_id = Column(Integer, ForeignKey("risk_warnings.id"))
+    related_change_request_ids = Column(Text)
+    matched_rule_name = Column(String(200))
+    match_reason = Column(String(500))
+    freeze_reason = Column(String(500))
+    unfreeze_reason = Column(String(500))
+    handler = Column(String(100))
+    handled_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    customer = relationship("Customer")
+    warning = relationship("RiskWarning")

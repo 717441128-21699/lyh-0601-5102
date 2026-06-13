@@ -3,12 +3,14 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from app.models import Customer, ChangeRequest, RiskWarning
 from app.services.utils import log_operation
+from app.services import risk_operation_service
 
 RISK_THRESHOLD = 3
 
 
 def check_risk_and_freeze(db: Session, customer_id: int,
-                           threshold: int = RISK_THRESHOLD) -> dict:
+                           threshold: int = RISK_THRESHOLD,
+                           change_request_id: int = None) -> dict:
     """
     检查风控规则，超过阈值才冻结
     默认阈值3次：即第4次提交时触发冻结
@@ -27,6 +29,7 @@ def check_risk_and_freeze(db: Session, customer_id: int,
     ).count()
 
     remaining = threshold - change_count
+    rule_hit = risk_operation_service.get_rule_hit_reason(customer, change_count, threshold)
 
     if change_count > threshold:
         if not customer.is_frozen:
@@ -44,6 +47,20 @@ def check_risk_and_freeze(db: Session, customer_id: int,
             db.add(warning)
             db.flush()
 
+            related_request_ids = [change_request_id] if change_request_id else None
+            risk_operation_service.create_risk_case(
+                db,
+                customer=customer,
+                risk_type="FREQUENT_CHANGE",
+                risk_level=rule_hit.get("level", "DANGER"),
+                description=rule_hit.get("reason", ""),
+                matched_rule_name=rule_hit.get("rule_name"),
+                match_reason=rule_hit.get("reason"),
+                related_warning_id=warning.id,
+                related_change_request_ids=related_request_ids,
+                freeze_reason=customer.freeze_reason
+            )
+
             log_operation(
                 db,
                 operation_type="RISK_FREEZE",
@@ -60,7 +77,8 @@ def check_risk_and_freeze(db: Session, customer_id: int,
             "change_count": change_count,
             "threshold": threshold,
             "customer_risk_status": "frozen",
-            "remaining_changes": 0
+            "remaining_changes": 0,
+            "rule_hit": rule_hit
         }
     elif change_count >= threshold:
         warning = RiskWarning(
@@ -74,6 +92,19 @@ def check_risk_and_freeze(db: Session, customer_id: int,
         db.add(warning)
         db.flush()
 
+        related_request_ids = [change_request_id] if change_request_id else None
+        risk_operation_service.create_risk_case(
+            db,
+            customer=customer,
+            risk_type="FREQUENT_CHANGE_WARNING",
+            risk_level=rule_hit.get("level", "WARNING"),
+            description=rule_hit.get("reason", ""),
+            matched_rule_name=rule_hit.get("rule_name"),
+            match_reason=rule_hit.get("reason"),
+            related_warning_id=warning.id,
+            related_change_request_ids=related_request_ids
+        )
+
         return {
             "triggered": True,
             "frozen": False,
@@ -81,7 +112,8 @@ def check_risk_and_freeze(db: Session, customer_id: int,
             "change_count": change_count,
             "threshold": threshold,
             "remaining_changes": 0,
-            "customer_risk_status": "warning"
+            "customer_risk_status": "warning",
+            "rule_hit": rule_hit
         }
     else:
         return {
@@ -91,7 +123,8 @@ def check_risk_and_freeze(db: Session, customer_id: int,
             "change_count": change_count,
             "threshold": threshold,
             "remaining_changes": remaining,
-            "customer_risk_status": "normal"
+            "customer_risk_status": "normal",
+            "rule_hit": rule_hit
         }
 
 
@@ -135,6 +168,23 @@ def handle_risk_warning(db: Session, warning_id: int, handler: str, comment: str
         if customer:
             customer.is_frozen = False
             customer.freeze_reason = None
+
+            open_cases = db.query(risk_operation_service.RiskCase).filter(
+                and_(
+                    risk_operation_service.RiskCase.customer_id == customer.id,
+                    risk_operation_service.RiskCase.status.in_(["OPEN", "PROCESSING"])
+                )
+            ).all()
+
+            for case in open_cases:
+                risk_operation_service.update_risk_case_status(
+                    db,
+                    case_id=case.id,
+                    status="RESOLVED",
+                    handler=handler,
+                    comment=comment,
+                    unfreeze_reason=comment
+                )
 
             log_operation(
                 db,

@@ -74,7 +74,7 @@ def submit_change_request(db: Session, request_data: ChangeRequestCreate,
         detail=f"提交客户主数据变更申请: {request_no}, 变更字段: {[f['field'] for f in diff_fields]}"
     )
 
-    risk_result = check_risk_and_freeze(db, customer.id)
+    risk_result = check_risk_and_freeze(db, customer.id, change_request_id=change_request.id)
     risk_triggered = risk_result["triggered"]
     risk_frozen = risk_result["frozen"]
     risk_reason = risk_result.get("reason", "")
@@ -274,7 +274,10 @@ def get_change_count_30d(db: Session, customer_id: int) -> int:
 
 
 def get_change_request_detail(db: Session, request_id: int) -> Dict[str, Any]:
-    """获取变更申请详情，包含审批流程记录"""
+    """获取变更申请详情，包含审批流程记录、同步结果汇总、指派历史、催办历史"""
+    from app.services import assignment_service
+    from app.services.sync_service import get_sync_summary
+
     request = get_change_request_by_id(db, request_id)
     if not request:
         raise ValueError("变更申请不存在")
@@ -295,6 +298,25 @@ def get_change_request_detail(db: Session, request_id: int) -> Dict[str, Any]:
             "next_approver": _format_next_approver(next_info)
         }
 
+    current_pending_record = next((r for r in approval_records if r.action == "PENDING"), None)
+    if current_pending_record:
+        result["current_assignee"] = current_pending_record.assignee
+        result["current_claimed_by"] = current_pending_record.claimed_by
+        result["candidate_users"] = json_to_dict(current_pending_record.candidate_users) if current_pending_record.candidate_users else []
+        result["assignment_type"] = current_pending_record.assignment_type
+
+    result["assignment_history"] = assignment_service.get_assignment_history(db, request_id)
+    result["reminder_history"] = assignment_service.get_reminder_history(db, request_id)
+
+    if request.status in ["APPROVED", "PARTIAL", "FAILED"]:
+        result["sync_summary"] = get_sync_summary(db, request_id)
+        result["order_manager_notified"] = request.order_manager_notified
+
+    result["matched_rule"] = {
+        "rule_id": request.matched_rule_id,
+        "rule_name": request.matched_rule_name
+    } if request.matched_rule_name else None
+
     return result
 
 
@@ -308,6 +330,7 @@ def format_change_request_response(change_request: ChangeRequest) -> Dict[str, A
         "submitter": change_request.submitter,
         "department": change_request.department,
         "priority": change_request.priority,
+        "urgency": change_request.urgency,
         "old_data": json_to_dict(change_request.old_data),
         "new_data": json_to_dict(change_request.new_data),
         "diff_data": json_to_dict(change_request.diff_data),
@@ -323,6 +346,8 @@ def format_change_request_response(change_request: ChangeRequest) -> Dict[str, A
         "risk_reason": change_request.risk_reason,
         "sync_status": change_request.sync_status,
         "synced_at": change_request.synced_at,
+        "order_manager_notified": change_request.order_manager_notified,
+        "matched_rule_name": change_request.matched_rule_name,
         "created_at": change_request.created_at,
         "updated_at": change_request.updated_at
     }

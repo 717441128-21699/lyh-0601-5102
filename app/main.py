@@ -9,7 +9,9 @@ from app.routers import (
     report_router,
     export_router,
     sync_router,
-    approval_router
+    approval_router,
+    assignment_router,
+    risk_operation_router
 )
 
 Base.metadata.create_all(bind=engine)
@@ -18,7 +20,7 @@ app = FastAPI(
     title="客户主数据变更管理系统",
     description="客户主数据变更管理中心，支持可配置审批流程、多维度规则匹配、"
                 "审批待办中心、超时催办、风控预警、多系统同步、每日统计报告等功能。",
-    version="2.0.0"
+    version="3.0.0"
 )
 
 app.add_middleware(
@@ -37,13 +39,15 @@ app.include_router(notification_router.router)
 app.include_router(report_router.router)
 app.include_router(export_router.router)
 app.include_router(sync_router.router)
+app.include_router(assignment_router.router)
+app.include_router(risk_operation_router.router)
 
 
 @app.get("/", tags=["系统"])
 def root():
     return {
         "name": "客户主数据变更管理系统",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "docs": "/docs",
         "redoc": "/redoc"
     }
@@ -75,9 +79,11 @@ async def startup_event():
 
     from app.database import SessionLocal
     from app.scripts import init_approval_data
+    from app.services import assignment_service
     db = SessionLocal()
     try:
         init_approval_data.init_default_approval_rules(db)
+        assignment_service.init_default_candidates(db)
     finally:
         db.close()
 

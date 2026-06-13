@@ -3,24 +3,27 @@ from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 from app.models import ChangeRequest, Customer, ApprovalRecord, ApprovalNode
-from app.services.utils import log_operation, json_to_dict
+from app.services.utils import log_operation, json_to_dict, dict_to_json
 from app.services.sync_service import sync_to_systems
 from app.services.notification_service import send_notification
-from app.services import approval_rule_service
+from app.services import approval_rule_service, assignment_service
 
 
 def _send_approval_notification(db: Session, change_request: ChangeRequest,
                                node_info: Dict, notification_type: str,
-                               title: str, content: str) -> bool:
+                               title: str, content: str,
+                               assignee: str = None) -> bool:
     """
-    发送审批相关通知，处理只有角色/部门没有具体审批人的情况
+    发送审批相关通知，优先发给具体指派人，否则用角色/部门格式
     返回: 是否成功发送
     """
     approver = node_info.get("approver", "")
     approver_role = node_info.get("approver_role", "")
     department = node_info.get("department", "")
 
-    if approver and approver.strip():
+    if assignee and assignee.strip():
+        recipient = assignee
+    elif approver and approver.strip():
         recipient = approver
     elif approver_role and department:
         recipient = f"@{department}_{approver_role}"
@@ -42,10 +45,31 @@ def _send_approval_notification(db: Session, change_request: ChangeRequest,
     return True
 
 
+def _setup_candidates_and_assignment(db: Session, change_request: ChangeRequest,
+                                     node_info: Dict, approval_record: ApprovalRecord):
+    """
+    设置候选处理人并尝试自动指派
+    """
+    role = node_info.get("approver_role")
+    department = node_info.get("department") or change_request.department
+
+    candidates = assignment_service.get_candidate_users(db, role=role, department=department)
+    approval_record.candidate_users = dict_to_json(candidates)
+
+    if candidates:
+        assignee = assignment_service.auto_assign(db, change_request, node_info)
+        if assignee:
+            approval_record.assignee = assignee
+            approval_record.assignment_type = "AUTO"
+            return assignee
+
+    return None
+
+
 def init_approval_flow(db: Session, change_request: ChangeRequest, customer: Customer,
                        diff_fields_count: int) -> Dict[str, Any]:
     """
-    初始化审批流程：匹配规则、创建初始审批记录、判断是否自动审批
+    初始化审批流程：匹配规则、创建初始审批记录、判断是否自动审批、自动指派处理人
     """
     match_result = approval_rule_service.match_approval_rule(
         db, customer, change_request.change_type,
@@ -59,9 +83,13 @@ def init_approval_flow(db: Session, change_request: ChangeRequest, customer: Cus
         }
 
     chain = match_result["chain"]
+    rule = match_result.get("rule")
     change_request.approval_chain_id = chain.id
     change_request.current_node_index = 0
     change_request.approval_level = chain.chain_name
+    if rule:
+        change_request.matched_rule_id = rule.id
+        change_request.matched_rule_name = rule.rule_name
 
     first_node_info = approval_rule_service.get_next_approver(chain, 0)
 
@@ -75,6 +103,7 @@ def init_approval_flow(db: Session, change_request: ChangeRequest, customer: Cus
         action="PENDING"
     )
     db.add(first_record)
+    db.flush()
 
     if not first_node_info["has_next"]:
         change_request.status = "APPROVED"
@@ -82,13 +111,15 @@ def init_approval_flow(db: Session, change_request: ChangeRequest, customer: Cus
         auto_approved = True
     else:
         auto_approved = False
+        assignee = _setup_candidates_and_assignment(db, change_request, first_node_info, first_record)
         _send_approval_notification(
             db,
             change_request=change_request,
             node_info=first_node_info,
             notification_type="APPROVAL_TODO",
             title="您有新的待审批申请",
-            content=f"变更申请 {change_request.request_no} 已提交，请及时处理。"
+            content=f"变更申请 {change_request.request_no} 已提交，请及时处理。",
+            assignee=assignee
         )
 
     db.flush()
@@ -96,12 +127,15 @@ def init_approval_flow(db: Session, change_request: ChangeRequest, customer: Cus
     return {
         "success": True,
         "matched_rule": match_result["rule_name"],
+        "matched_rule_id": rule.id if rule else None,
         "match_reason": match_result["match_reason"],
         "chain_name": chain.chain_name,
         "total_nodes": len(chain.nodes),
         "current_node_index": 0,
         "next_approver": first_node_info,
-        "auto_approved": auto_approved
+        "auto_approved": auto_approved,
+        "assignee": first_record.assignee,
+        "candidate_users": json_to_dict(first_record.candidate_users) if first_record.candidate_users else []
     }
 
 
@@ -170,6 +204,9 @@ def approve_request(db: Session, request_id: int, approver: str,
             action="PENDING"
         )
         db.add(next_record)
+        db.flush()
+
+        next_assignee = _setup_candidates_and_assignment(db, change_request, next_node_info, next_record)
 
         _send_approval_notification(
             db,
@@ -177,7 +214,8 @@ def approve_request(db: Session, request_id: int, approver: str,
             node_info=next_node_info,
             notification_type="APPROVAL_TODO",
             title="您有新的待审批申请",
-            content=f"变更申请 {change_request.request_no} 已提交至您审批，请及时处理。"
+            content=f"变更申请 {change_request.request_no} 已提交至您审批，请及时处理。",
+            assignee=next_assignee
         )
     else:
         change_request.status = "APPROVED"
@@ -337,22 +375,38 @@ def batch_reject(db: Session, request_ids: List[int], approver: str,
 
 def get_my_todo(db: Session, approver: str = None, role: str = None,
                 department: str = None, priority: str = None,
-                is_overdue: bool = None, page: int = 1,
-                page_size: int = 20) -> Dict[str, Any]:
+                urgency: str = None, is_overdue: bool = None, page: int = 1,
+                page_size: int = 20, include_claimable: bool = False) -> Dict[str, Any]:
     """
     获取我的待审批列表
-    支持按审批人、角色、部门、优先级、是否超时筛选
+    支持按审批人、角色、部门、优先级、加急、是否超时筛选
+    include_claimable=True 时也返回可签收的任务（角色/部门匹配但未指派给具体人的）
     """
     subquery = db.query(ApprovalRecord.change_request_id).filter(
         ApprovalRecord.action == "PENDING"
     )
     if approver:
-        subquery = subquery.filter(
-            or_(
-                ApprovalRecord.approver == approver,
-                ApprovalRecord.approver.is_(None)
+        if include_claimable:
+            subquery = subquery.filter(
+                or_(
+                    ApprovalRecord.assignee == approver,
+                    ApprovalRecord.approver == approver,
+                    and_(
+                        ApprovalRecord.assignee.is_(None),
+                        or_(
+                            and_(ApprovalRecord.approver_role == role, role is not None),
+                            and_(ApprovalRecord.department == department, department is not None)
+                        )
+                    )
+                )
             )
-        )
+        else:
+            subquery = subquery.filter(
+                or_(
+                    ApprovalRecord.assignee == approver,
+                    ApprovalRecord.approver == approver
+                )
+            )
     if role:
         subquery = subquery.filter(ApprovalRecord.approver_role == role)
     if department:
@@ -368,20 +422,35 @@ def get_my_todo(db: Session, approver: str = None, role: str = None,
     if priority:
         query = query.filter(ChangeRequest.priority == priority)
 
+    if urgency:
+        query = query.filter(ChangeRequest.urgency == urgency)
+
     if is_overdue is not None:
         query = query.filter(ChangeRequest.is_overdue == is_overdue)
 
     total = query.count()
     items = query.order_by(
+        ChangeRequest.urgency.desc(),
         ChangeRequest.priority.desc(),
         ChangeRequest.created_at.asc()
     ).offset((page - 1) * page_size).limit(page_size).all()
+
+    result_items = []
+    for item in items:
+        item_dict = {c.name: getattr(item, c.name) for c in item.__table__.columns}
+        current_record = next((r for r in item.approval_records if r.action == "PENDING"), None)
+        if current_record:
+            item_dict["current_assignee"] = current_record.assignee
+            item_dict["current_claimed_by"] = current_record.claimed_by
+            item_dict["candidate_users"] = json_to_dict(current_record.candidate_users) if current_record.candidate_users else []
+            item_dict["assignment_type"] = current_record.assignment_type
+        result_items.append(item_dict)
 
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": items
+        "items": result_items
     }
 
 
@@ -445,6 +514,7 @@ def check_and_update_overdue(db: Session) -> dict:
     返回: {"new_overdue": 新增超时数量, "notifications_sent": 发送通知数量}
     """
     from app.models import ApprovalChain
+    from app.services import assignment_service
 
     pending_requests = db.query(ChangeRequest).filter(
         ChangeRequest.status == "PENDING"
@@ -492,18 +562,30 @@ def check_and_update_overdue(db: Session) -> dict:
                 if current_record:
                     current_record.is_overdue = True
 
+                assignee = current_record.assignee if current_record else None
+
                 node_info = {
                     "approver": current_node.approver,
                     "approver_role": current_node.approver_role,
                     "department": current_node.department
                 }
+
+                assignment_service.send_reminder(
+                    db,
+                    request_id=req.id,
+                    operator="SYSTEM",
+                    reason=f"审批申请已超过 {current_node.timeout_hours} 小时未处理",
+                    is_escalated=False
+                )
+
                 sent = _send_approval_notification(
                     db,
                     change_request=req,
                     node_info=node_info,
                     notification_type="OVERDUE_REMINDER",
                     title="审批申请超时提醒",
-                    content=f"变更申请 {req.request_no} 已超过 {current_node.timeout_hours} 小时未处理，请尽快审批！"
+                    content=f"变更申请 {req.request_no} 已超过 {current_node.timeout_hours} 小时未处理，请尽快审批！",
+                    assignee=assignee
                 )
                 if sent:
                     notifications_sent += 1
