@@ -75,9 +75,13 @@ def submit_change_request(db: Session, request_data: ChangeRequestCreate,
     )
 
     risk_result = check_risk_and_freeze(db, customer.id)
-    if risk_result["frozen"]:
+    risk_triggered = risk_result["triggered"]
+    risk_frozen = risk_result["frozen"]
+    risk_reason = risk_result.get("reason", "")
+
+    if risk_frozen:
         change_request.risk_triggered = True
-        change_request.risk_reason = risk_result["reason"]
+        change_request.risk_reason = risk_reason
         change_request.status = "RISK_HOLD"
         change_request.sync_status = "BLOCKED"
         db.flush()
@@ -89,12 +93,19 @@ def submit_change_request(db: Session, request_data: ChangeRequestCreate,
             "request": format_change_request_response(change_request),
             "risk_triggered": True,
             "risk_frozen": True,
-            "risk_reason": risk_result["reason"],
+            "risk_reason": risk_reason,
+            "risk_info": {
+                "change_count_30d": risk_result.get("change_count", 3),
+                "risk_threshold": risk_result.get("threshold"),
+                "status": risk_result.get("customer_risk_status"),
+                "remaining_changes": risk_result.get("remaining_changes"),
+                "is_frozen": True
+            },
             "approval_flow": None
         }
-    elif risk_result["triggered"] and not risk_result["frozen"]:
+    elif risk_triggered:
         change_request.risk_triggered = True
-        change_request.risk_reason = risk_result["reason"]
+        change_request.risk_reason = risk_reason
         db.flush()
 
     approval_result = init_approval_flow(db, change_request, customer, len(diff_fields))
@@ -103,12 +114,45 @@ def submit_change_request(db: Session, request_data: ChangeRequestCreate,
         db.rollback()
         raise ValueError(approval_result["message"])
 
+    if approval_result.get("auto_approved"):
+        from app.services.sync_service import sync_to_systems
+        from app.services.notification_service import send_notification
+
+        sync_result = sync_to_systems(db, change_request)
+
+        old_customer_data = json_to_dict(change_request.old_data)
+        new_data = json_to_dict(change_request.new_data)
+        for field, new_value in new_data.items():
+            if hasattr(customer, field):
+                old_value = getattr(customer, field)
+                if old_value != new_value:
+                    setattr(customer, field, new_value)
+
+        order_manager = getattr(customer, "order_manager") or ""
+        if order_manager:
+            send_notification(
+                db,
+                change_request_id=change_request.id,
+                recipient=order_manager,
+                notification_type="SYNC_COMPLETE",
+                title="客户主数据同步完成",
+                content=f"客户 {customer.customer_name} 的变更申请 {change_request.request_no} 已完成所有系统同步。"
+            )
+
     db.commit()
     db.refresh(change_request)
 
     return {
         "request": format_change_request_response(change_request),
-        "risk_triggered": False,
+        "risk_triggered": risk_triggered,
+        "risk_frozen": False,
+        "risk_info": {
+            "change_count_30d": risk_result.get("change_count", 0),
+            "risk_threshold": risk_result.get("threshold"),
+            "status": risk_result.get("customer_risk_status"),
+            "remaining_changes": risk_result.get("remaining_changes"),
+            "is_frozen": False
+        } if risk_triggered else None,
         "approval_flow": {
             "matched_rule": approval_result.get("matched_rule"),
             "match_reason": approval_result.get("match_reason"),
@@ -321,13 +365,21 @@ def get_dashboard_stats(db: Session, approver: str = None) -> Dict[str, Any]:
 
 
 def continue_after_risk_unfreeze(db: Session, customer_id: int):
-    """客户解除风控冻结后，重新激活其待审批申请"""
+    """客户解除风控冻结后，重新激活其待审批申请，完整恢复审批链和待办"""
+    from app.services.approval_service import (
+        init_approval_flow, get_approval_records,
+        _send_approval_notification
+    )
+    from app.services.approval_rule_service import get_next_approver
+
     pending_requests = db.query(ChangeRequest).filter(
         and_(
             ChangeRequest.customer_id == customer_id,
             ChangeRequest.status == "RISK_HOLD"
         )
     ).all()
+
+    customer = db.query(Customer).filter(Customer.id == customer_id).first()
 
     for req in pending_requests:
         req.status = "PENDING"
@@ -343,5 +395,79 @@ def continue_after_risk_unfreeze(db: Session, customer_id: int):
             target_id=req.id,
             detail="客户解除冻结，申请恢复审批流程"
         )
+
+        if req.approval_chain_id is None:
+            old_data = json_to_dict(req.old_data)
+            new_data = json_to_dict(req.new_data)
+            diff_fields = []
+            for field, new_val in new_data.items():
+                old_val = old_data.get(field)
+                if old_val != new_val:
+                    diff_fields.append({
+                        "field": field,
+                        "old_value": old_val,
+                        "new_value": new_val
+                    })
+
+            if customer:
+                init_result = init_approval_flow(db, req, customer, len(diff_fields))
+                if init_result["success"] and init_result.get("auto_approved"):
+                    from app.services.sync_service import sync_to_systems
+                    from app.services.notification_service import send_notification
+
+                    sync_to_systems(db, req)
+
+                    new_values = json_to_dict(req.new_data)
+                    for field, new_value in new_values.items():
+                        if hasattr(customer, field):
+                            old_value = getattr(customer, field)
+                            if old_value != new_value:
+                                setattr(customer, field, new_value)
+
+                    order_manager = getattr(customer, "order_manager") or ""
+                    if order_manager:
+                        send_notification(
+                            db,
+                            change_request_id=req.id,
+                            recipient=order_manager,
+                            notification_type="SYNC_COMPLETE",
+                            title="客户主数据同步完成",
+                            content=f"客户 {customer.customer_name} 的变更申请 {req.request_no} 已完成所有系统同步。"
+                        )
+        else:
+            current_index = req.current_node_index
+            chain = req.approval_chain
+
+            if chain and current_index < len(chain.nodes):
+                existing_record = db.query(ApprovalRecord).filter(
+                    and_(
+                        ApprovalRecord.change_request_id == req.id,
+                        ApprovalRecord.node_order == current_index
+                    )
+                ).first()
+
+                if not existing_record:
+                    next_node_info = get_next_approver(chain, current_index)
+                    new_record = ApprovalRecord(
+                        change_request_id=req.id,
+                        node_id=next_node_info.get("node_id"),
+                        node_name=next_node_info.get("node_name", "待审批"),
+                        node_order=current_index,
+                        approver_role=next_node_info.get("approver_role"),
+                        approver=next_node_info.get("approver"),
+                        action="PENDING"
+                    )
+                    db.add(new_record)
+
+                    next_node_info = get_next_approver(chain, current_index)
+                    if next_node_info["has_next"]:
+                        _send_approval_notification(
+                            db,
+                            change_request=req,
+                            node_info=next_node_info,
+                            notification_type="APPROVAL_TODO",
+                            title="您有新的待审批申请（风控解除后恢复）",
+                            content=f"客户风控已解除，变更申请 {req.request_no} 恢复审批流程，请及时处理。"
+                        )
 
     db.flush()

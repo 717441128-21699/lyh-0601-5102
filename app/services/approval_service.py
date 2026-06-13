@@ -9,6 +9,39 @@ from app.services.notification_service import send_notification
 from app.services import approval_rule_service
 
 
+def _send_approval_notification(db: Session, change_request: ChangeRequest,
+                               node_info: Dict, notification_type: str,
+                               title: str, content: str) -> bool:
+    """
+    发送审批相关通知，处理只有角色/部门没有具体审批人的情况
+    返回: 是否成功发送
+    """
+    approver = node_info.get("approver", "")
+    approver_role = node_info.get("approver_role", "")
+    department = node_info.get("department", "")
+
+    if approver and approver.strip():
+        recipient = approver
+    elif approver_role and department:
+        recipient = f"@{department}_{approver_role}"
+    elif approver_role:
+        recipient = f"@ROLE_{approver_role}"
+    elif department:
+        recipient = f"@DEPT_{department}"
+    else:
+        return False
+
+    send_notification(
+        db,
+        change_request_id=change_request.id,
+        recipient=recipient,
+        notification_type=notification_type,
+        title=title,
+        content=content
+    )
+    return True
+
+
 def init_approval_flow(db: Session, change_request: ChangeRequest, customer: Customer,
                        diff_fields_count: int) -> Dict[str, Any]:
     """
@@ -46,11 +79,13 @@ def init_approval_flow(db: Session, change_request: ChangeRequest, customer: Cus
     if not first_node_info["has_next"]:
         change_request.status = "APPROVED"
         change_request.approved_at = datetime.now()
+        auto_approved = True
     else:
-        send_notification(
+        auto_approved = False
+        _send_approval_notification(
             db,
-            change_request_id=change_request.id,
-            recipient=first_node_info.get("approver", ""),
+            change_request=change_request,
+            node_info=first_node_info,
             notification_type="APPROVAL_TODO",
             title="您有新的待审批申请",
             content=f"变更申请 {change_request.request_no} 已提交，请及时处理。"
@@ -65,7 +100,8 @@ def init_approval_flow(db: Session, change_request: ChangeRequest, customer: Cus
         "chain_name": chain.chain_name,
         "total_nodes": len(chain.nodes),
         "current_node_index": 0,
-        "next_approver": first_node_info
+        "next_approver": first_node_info,
+        "auto_approved": auto_approved
     }
 
 
@@ -135,10 +171,10 @@ def approve_request(db: Session, request_id: int, approver: str,
         )
         db.add(next_record)
 
-        send_notification(
+        _send_approval_notification(
             db,
-            change_request_id=request_id,
-            recipient=next_node_info.get("approver", ""),
+            change_request=change_request,
+            node_info=next_node_info,
             notification_type="APPROVAL_TODO",
             title="您有新的待审批申请",
             content=f"变更申请 {change_request.request_no} 已提交至您审批，请及时处理。"
@@ -456,15 +492,21 @@ def check_and_update_overdue(db: Session) -> dict:
                 if current_record:
                     current_record.is_overdue = True
 
-                send_notification(
+                node_info = {
+                    "approver": current_node.approver,
+                    "approver_role": current_node.approver_role,
+                    "department": current_node.department
+                }
+                sent = _send_approval_notification(
                     db,
-                    change_request_id=req.id,
-                    recipient=current_node.approver or "",
+                    change_request=req,
+                    node_info=node_info,
                     notification_type="OVERDUE_REMINDER",
                     title="审批申请超时提醒",
                     content=f"变更申请 {req.request_no} 已超过 {current_node.timeout_hours} 小时未处理，请尽快审批！"
                 )
-                notifications_sent += 1
+                if sent:
+                    notifications_sent += 1
 
     db.commit()
     return {

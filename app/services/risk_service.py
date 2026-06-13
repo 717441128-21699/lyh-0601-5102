@@ -58,7 +58,9 @@ def check_risk_and_freeze(db: Session, customer_id: int,
             "frozen": True,
             "reason": f"30天内变更{change_count}次，超过阈值{threshold}次，触发风控冻结",
             "change_count": change_count,
-            "threshold": threshold
+            "threshold": threshold,
+            "customer_risk_status": "frozen",
+            "remaining_changes": 0
         }
     elif change_count >= threshold:
         warning = RiskWarning(
@@ -78,7 +80,8 @@ def check_risk_and_freeze(db: Session, customer_id: int,
             "reason": f"30天内变更{change_count}次，已达阈值{threshold}次，请注意风控",
             "change_count": change_count,
             "threshold": threshold,
-            "remaining": 0
+            "remaining_changes": 0,
+            "customer_risk_status": "warning"
         }
     else:
         return {
@@ -87,7 +90,8 @@ def check_risk_and_freeze(db: Session, customer_id: int,
             "reason": "",
             "change_count": change_count,
             "threshold": threshold,
-            "remaining": remaining
+            "remaining_changes": remaining,
+            "customer_risk_status": "normal"
         }
 
 
